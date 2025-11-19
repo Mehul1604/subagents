@@ -24,3 +24,10 @@ Thumbs.db
 # Environment variables
 .env
 .env.local
+
+# MCP configuration (contains secrets)
+.mcp.json
+
+# Logs
+server.log
+*.log

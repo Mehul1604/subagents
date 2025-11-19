@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -6,6 +6,7 @@ from fastapi_mcp import FastApiMCP
 from typing import List, Optional
 from datetime import datetime
 import uuid
+import bcrypt
 
 app = FastAPI(title="Simple Form API", version="1.0.0")
 
@@ -15,6 +16,30 @@ mcp.mount_http(app)
 
 # In-memory storage for demo purposes
 data_store: List[dict] = []
+
+# In-memory user credentials storage (username: password_hash)
+# Initialize empty, will be populated on first access
+user_credentials: dict = {}
+
+# Active session storage (token: username)
+active_sessions: dict = {}
+
+# Helper functions for password hashing
+def hash_password(password: str) -> str:
+    """Hash a password using bcrypt"""
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(password: str, hashed: str) -> bool:
+    """Verify a password against its hash"""
+    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+# Initialize default users with hashed passwords
+def initialize_default_users():
+    """Initialize default users with hashed passwords"""
+    if not user_credentials:
+        user_credentials["admin"] = hash_password("admin123")
+        user_credentials["user1"] = hash_password("password123")
+        user_credentials["testuser"] = hash_password("test1234")
 
 
 # Pydantic model for data validation
@@ -30,6 +55,44 @@ class DetailResponse(BaseModel):
     email: str
     message: str
     created_at: str
+
+
+# Authentication models
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=6, max_length=100)
+
+
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=6, max_length=100)
+    email: str = Field(..., pattern=r'^[\w\.-]+@[\w\.-]+\.\w+$')
+
+
+class LoginResponse(BaseModel):
+    success: bool
+    message: str
+    username: Optional[str] = None
+    token: Optional[str] = None
+
+
+class UserResponse(BaseModel):
+    username: str
+    email: str
+    created_at: str
+
+
+# Token verification dependency
+async def verify_token(authorization: str = Header(None)):
+    """Verify authentication token from Authorization header"""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    token = authorization.replace("Bearer ", "")
+    if token not in active_sessions:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    return active_sessions[token]
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -207,11 +270,119 @@ async def read_root():
                 padding: 8px 16px;
                 font-size: 14px;
             }
+            .auth-container {
+                background: white;
+                border-radius: 10px;
+                padding: 30px;
+                margin-bottom: 30px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            }
+            .auth-tabs {
+                display: flex;
+                margin-bottom: 20px;
+                border-bottom: 2px solid #e0e0e0;
+            }
+            .auth-tab {
+                flex: 1;
+                padding: 12px;
+                text-align: center;
+                cursor: pointer;
+                background: transparent;
+                border: none;
+                font-size: 16px;
+                font-weight: 600;
+                color: #999;
+                transition: all 0.3s;
+            }
+            .auth-tab.active {
+                color: #667eea;
+                border-bottom: 3px solid #667eea;
+            }
+            .auth-form {
+                display: none;
+            }
+            .auth-form.active {
+                display: block;
+            }
+            .user-info {
+                background: #e8f5e9;
+                border-left: 4px solid #4caf50;
+                padding: 15px;
+                margin-bottom: 20px;
+                border-radius: 5px;
+                display: none;
+            }
+            .user-info.show {
+                display: block;
+            }
+            .user-info p {
+                margin: 5px 0;
+                color: #2e7d32;
+            }
+            .logout-btn {
+                background: #f44336;
+                padding: 8px 16px;
+                font-size: 14px;
+                margin-top: 10px;
+            }
+            .hidden {
+                display: none !important;
+            }
         </style>
     </head>
     <body>
         <div class="container">
             <h1>Simple Form API</h1>
+
+            <!-- Authentication Section -->
+            <div id="authContainer" class="auth-container">
+                <div class="user-info" id="userInfo">
+                    <p><strong>Logged in as:</strong> <span id="loggedInUser"></span></p>
+                    <button class="logout-btn" onclick="logout()">Logout</button>
+                </div>
+                <div id="authForms">
+                    <h2>Authentication</h2>
+                    <div class="auth-tabs">
+                        <button class="auth-tab active" onclick="switchTab('login')">Login</button>
+                        <button class="auth-tab" onclick="switchTab('register')">Register</button>
+                    </div>
+                    <div id="authStatusMessage" class="message"></div>
+
+                    <!-- Login Form -->
+                    <div id="loginForm" class="auth-form active">
+                        <form id="loginFormElement">
+                            <div class="form-group">
+                                <label for="loginUsername">Username:</label>
+                                <input type="text" id="loginUsername" name="username" required minlength="3" maxlength="50">
+                            </div>
+                            <div class="form-group">
+                                <label for="loginPassword">Password:</label>
+                                <input type="password" id="loginPassword" name="password" required minlength="6" maxlength="100">
+                            </div>
+                            <button type="submit">Login</button>
+                        </form>
+                    </div>
+
+                    <!-- Register Form -->
+                    <div id="registerForm" class="auth-form">
+                        <form id="registerFormElement">
+                            <div class="form-group">
+                                <label for="registerUsername">Username:</label>
+                                <input type="text" id="registerUsername" name="username" required minlength="3" maxlength="50">
+                            </div>
+                            <div class="form-group">
+                                <label for="registerEmail">Email:</label>
+                                <input type="email" id="registerEmail" name="email" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="registerPassword">Password:</label>
+                                <input type="password" id="registerPassword" name="password" required minlength="6" maxlength="100">
+                            </div>
+                            <button type="submit">Register</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
 
             <div class="form-container">
                 <h2>Submit Details</h2>
@@ -270,8 +441,151 @@ async def read_root():
         </div>
 
         <script>
+            // Authentication state management
+            function checkAuthStatus() {
+                const username = localStorage.getItem('username');
+                const token = localStorage.getItem('token');
+
+                if (username && token) {
+                    document.getElementById('loggedInUser').textContent = username;
+                    document.getElementById('userInfo').classList.add('show');
+                    document.getElementById('authForms').classList.add('hidden');
+                } else {
+                    document.getElementById('userInfo').classList.remove('show');
+                    document.getElementById('authForms').classList.remove('hidden');
+                }
+            }
+
+            // Switch between login and register tabs
+            function switchTab(tab) {
+                const loginForm = document.getElementById('loginForm');
+                const registerForm = document.getElementById('registerForm');
+                const loginTab = document.querySelector('.auth-tab:nth-child(1)');
+                const registerTab = document.querySelector('.auth-tab:nth-child(2)');
+
+                if (tab === 'login') {
+                    loginForm.classList.add('active');
+                    registerForm.classList.remove('active');
+                    loginTab.classList.add('active');
+                    registerTab.classList.remove('active');
+                } else {
+                    registerForm.classList.add('active');
+                    loginForm.classList.remove('active');
+                    registerTab.classList.add('active');
+                    loginTab.classList.remove('active');
+                }
+            }
+
+            // Handle login form submission
+            document.getElementById('loginFormElement').addEventListener('submit', async (e) => {
+                e.preventDefault();
+
+                const formData = {
+                    username: document.getElementById('loginUsername').value,
+                    password: document.getElementById('loginPassword').value
+                };
+
+                try {
+                    const response = await fetch('/login', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(formData)
+                    });
+
+                    const result = await response.json();
+
+                    if (result.success) {
+                        localStorage.setItem('username', result.username);
+                        localStorage.setItem('token', result.token);
+                        showAuthMessage(result.message, 'success');
+                        document.getElementById('loginFormElement').reset();
+                        checkAuthStatus();
+                    } else {
+                        showAuthMessage(result.message, 'error');
+                    }
+                } catch (error) {
+                    showAuthMessage('Error: ' + error.message, 'error');
+                }
+            });
+
+            // Handle register form submission
+            document.getElementById('registerFormElement').addEventListener('submit', async (e) => {
+                e.preventDefault();
+
+                const formData = {
+                    username: document.getElementById('registerUsername').value,
+                    email: document.getElementById('registerEmail').value,
+                    password: document.getElementById('registerPassword').value
+                };
+
+                try {
+                    const response = await fetch('/register', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify(formData)
+                    });
+
+                    const result = await response.json();
+
+                    if (result.success) {
+                        localStorage.setItem('username', result.username);
+                        localStorage.setItem('token', result.token);
+                        showAuthMessage(result.message, 'success');
+                        document.getElementById('registerFormElement').reset();
+                        checkAuthStatus();
+                    } else {
+                        showAuthMessage(result.message, 'error');
+                    }
+                } catch (error) {
+                    showAuthMessage('Error: ' + error.message, 'error');
+                }
+            });
+
+            // Logout function
+            async function logout() {
+                const token = localStorage.getItem('token');
+
+                // Call backend logout endpoint to invalidate token
+                if (token) {
+                    try {
+                        await fetch('/logout', {
+                            method: 'POST',
+                            headers: {
+                                'Authorization': `Bearer ${token}`
+                            }
+                        });
+                    } catch (error) {
+                        console.error('Logout error:', error);
+                    }
+                }
+
+                localStorage.removeItem('username');
+                localStorage.removeItem('token');
+                checkAuthStatus();
+                showAuthMessage('Logged out successfully', 'success');
+            }
+
+            // Show authentication message
+            function showAuthMessage(text, type) {
+                const messageDiv = document.getElementById('authStatusMessage');
+                messageDiv.textContent = text;
+                messageDiv.className = 'message ' + type;
+                messageDiv.style.display = 'block';
+
+                setTimeout(() => {
+                    messageDiv.style.display = 'none';
+                }, 5000);
+            }
+
             // Load data on page load
-            document.addEventListener('DOMContentLoaded', loadData);
+            document.addEventListener('DOMContentLoaded', () => {
+                checkAuthStatus();
+                loadData();
+            });
 
             // Handle form submission
             document.getElementById('detailsForm').addEventListener('submit', async (e) => {
@@ -476,6 +790,104 @@ async def read_root():
     </html>
     """
     return HTMLResponse(content=html_content)
+
+
+@app.post("/login", response_model=LoginResponse)
+async def login(credentials: LoginRequest):
+    """
+    POST endpoint to authenticate user with username and password
+    """
+    # Initialize default users if not already done
+    initialize_default_users()
+
+    username = credentials.username
+    password = credentials.password
+
+    # Check if username exists
+    if username not in user_credentials:
+        return LoginResponse(
+            success=False,
+            message="Invalid username or password"
+        )
+
+    # Verify password using bcrypt
+    if not verify_password(password, user_credentials[username]):
+        return LoginResponse(
+            success=False,
+            message="Invalid username or password"
+        )
+
+    # Generate token and store session
+    token = str(uuid.uuid4())
+    active_sessions[token] = username
+
+    return LoginResponse(
+        success=True,
+        message="Login successful",
+        username=username,
+        token=token
+    )
+
+
+@app.post("/register", response_model=LoginResponse)
+async def register(user_data: RegisterRequest):
+    """
+    POST endpoint to register a new user
+    """
+    username = user_data.username
+
+    # Check if username already exists
+    if username in user_credentials:
+        return LoginResponse(
+            success=False,
+            message="Username already exists"
+        )
+
+    # Hash password and add new user to credentials store
+    user_credentials[username] = hash_password(user_data.password)
+
+    # Generate token and store session for immediate login
+    token = str(uuid.uuid4())
+    active_sessions[token] = username
+
+    return LoginResponse(
+        success=True,
+        message="Registration successful",
+        username=username,
+        token=token
+    )
+
+
+@app.post("/logout")
+async def logout(authorization: str = Header(None)):
+    """
+    POST endpoint to logout and invalidate the session token
+    """
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.replace("Bearer ", "")
+        if token in active_sessions:
+            del active_sessions[token]
+
+    return {"message": "Logged out successfully"}
+
+
+@app.get("/users")
+async def get_users(username: str = Depends(verify_token)):
+    """
+    GET endpoint to list all registered users (admin only)
+    Returns usernames only, not passwords
+    """
+    # Initialize default users if not already done
+    initialize_default_users()
+
+    # Only allow admin user to access this endpoint
+    if username != "admin":
+        raise HTTPException(status_code=403, detail="Forbidden: Admin access required")
+
+    return {
+        "users": list(user_credentials.keys()),
+        "count": len(user_credentials)
+    }
 
 
 @app.post("/postDetails", response_model=DetailResponse)
