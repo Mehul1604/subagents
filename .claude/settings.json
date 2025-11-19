@@ -1,0 +1,13 @@
+{
+  "project": {
+    "name": "FastAPI Form Application",
+    "type": "web",
+    "framework": "FastAPI",
+    "language": "Python"
+  },
+  "preferences": {
+    "python_version": "3.8+",
+    "code_style": "monolithic",
+    "server_port": 8000
+  }
+}
